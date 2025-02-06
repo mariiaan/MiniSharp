@@ -1,5 +1,6 @@
 ﻿using MiniSharp;
 using MiniSharp.Values;
+using System.Globalization;
 using System.Reflection;
 
 namespace MiniSharp
@@ -288,7 +289,7 @@ namespace MiniSharp
 
             public override string ToString()
             {
-                return m_value.ToString();
+                return m_value.ToString(CultureInfo.InvariantCulture) + "f";
             }
 
             public double Value
@@ -560,21 +561,20 @@ namespace MiniSharp
             }
         }
 
-        public void Parse(string path, bool additional = false)
+        public void Parse(StreamReader from, bool additional = false)
         {
             if (!additional || m_root == null)
                 m_root = new Section();
 
-            StreamReader sr = new StreamReader(path);
             int lineCounter = 0;
             Section? currentSection = null;
 
             List<string> commentBuffer = new List<string>();
             
-            while (!sr.EndOfStream)
+            while (!from.EndOfStream)
             {
                 ++lineCounter;
-                string? currentLine = sr.ReadLine()?.Trim();
+                string? currentLine = from.ReadLine()?.Trim();
                 if (currentLine == null || currentLine.Length == 0)
                     continue;
                 char firstChar = currentLine[0];
@@ -651,15 +651,67 @@ namespace MiniSharp
 
                 currentSection.Values.Add(keyValuePair.Key, parsedValue);
             }
-
-            sr.Close();
         }
 
-        public void Write(string path)
+        public void Write(StreamWriter to)
         {
-            StreamWriter sw = new StreamWriter(path);
-            WriteSection(m_root, sw, "");
-            sw.Flush();
+            WriteSection(m_root, to, "");
+            to.Flush();
+        }
+
+        private static void DeserializeSingle(object to, Section sect)
+        {
+            var fields = to.GetType().GetFields(BindingFlags.Public | BindingFlags.Instance);
+            bool serializeWholeClass = to.GetType().GetCustomAttribute<MiniSerialize>() != null;
+            foreach (var field in fields)
+            {
+                var attribute = field.GetCustomAttribute<MiniSerialize>();
+                if (attribute == null && !serializeWholeClass)
+                    continue;
+                if (field.GetCustomAttribute<MiniDoNotSerialize>() != null)
+                    continue;
+                if (field.FieldType == typeof(string))
+                {
+                    var val = sect.GetValue<StringValue>(attribute?.Name == null ? field.Name : attribute.Name).Value;
+                    field.SetValue(to, val);
+                }
+                else if (field.FieldType == typeof(int))
+                {
+                    field.SetValue(to, (int)sect.GetValue<IntValue>(attribute?.Name == null ? field.Name : attribute.Name).Value);
+                }
+                else if (field.FieldType == typeof(long))
+                {
+                    field.SetValue(to, sect.GetValue<IntValue>(attribute?.Name == null ? field.Name : attribute.Name).Value);
+                }
+                else if (field.FieldType == typeof(bool))
+                {
+                    field.SetValue(to, sect.GetValue<BooleanValue>(attribute?.Name == null ? field.Name : attribute.Name).Value);
+                }
+                else if (field.FieldType == typeof(double))
+                {
+                    field.SetValue(to, sect.GetValue<FloatValue>(attribute?.Name == null ? field.Name : attribute.Name).Value);
+                }
+                else if (field.FieldType == typeof(float))
+                {
+                    field.SetValue(to, (float)sect.GetValue<FloatValue>(attribute?.Name == null ? field.Name : attribute.Name).Value);
+                }
+                else if (field.FieldType.IsInstanceOfType(typeof(List<object>)))
+                {
+                    List<Value> values = sect.GetValue<ArrayValue>(attribute?.Name == null ? field.Name : attribute.Name).Value;
+                    List<object> list = new List<object>();
+                    foreach (var val in values)
+                    {
+                        list.Add(val);
+                    }
+                    field.SetValue(to, list);
+                }
+                else
+                {
+                    object subObject = Activator.CreateInstance(field.FieldType);
+                    DeserializeSingle(subObject, sect.SubSections[attribute?.Name == null ? field.Name : attribute.Name]);
+                    field.SetValue(to, subObject);
+                }
+            }
         }
 
         private static void SerializeSingle(Section root, object o)
@@ -674,7 +726,6 @@ namespace MiniSharp
                     continue;
                 if (field.GetCustomAttribute<MiniDoNotSerialize>() != null)
                     continue;
-
                 if (field.FieldType == typeof(string))
                 {
                     string? value = (string?)field.GetValue(o);
@@ -748,6 +799,14 @@ namespace MiniSharp
             SerializeSingle(root, o);
 
             return minifile;
+        }
+        
+        public static T Deserialize<T>(Minifile minifile)
+        {
+            T o = Activator.CreateInstance<T>();
+
+            DeserializeSingle((object)o, minifile.Root.SubSections.Values.First());
+            return (T)o;
         }
     }
 
